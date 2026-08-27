@@ -155,3 +155,5 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/git,vim,linux,macos,windows,visualstudiocode,go
 
 /report
+/slide
+overlay.txt
