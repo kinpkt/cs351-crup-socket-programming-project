@@ -32,9 +32,20 @@ func main() {
 	dataChannel := make(chan StationData)
 	keyboardChannel := make(chan string)
 
+	stationStates := make(map[string]*OverlayState)
+
 	for i := 0; i <= STATION_COUNT; i++ {
 		stationName := fmt.Sprintf("Station %d", i+1)
 		serverAddr := fmt.Sprintf("localhost:%d", BASE_PORT+i)
+
+		// Init states for each stations
+		stationStates[stationName] = &OverlayState{
+			CompetitorName: "Waiting...",
+			CurrentAttempt: 1,
+			Solves:         [5]string{"-", "-", "-", "-", "-"},
+			RunningTime:    "0.00",
+			IsSolving:      false,
+		}
 
 		go listenToServer(stationName, serverAddr, dataChannel)
 	}
@@ -49,72 +60,71 @@ func main() {
 	currentFocusedStation := "Station 1"
 	fmt.Printf("Master Scoreboard started. Focusing on %s\n", currentFocusedStation)
 
-	// Init scoreboard data
-	boardState := OverlayState{
-		CompetitorName: "Waiting...",
-		CurrentAttempt: 1,
-		Solves:         [5]string{"-", "-", "-", "-", "-"},
-		RunningTime:    "0.00",
-		IsSolving:      false,
-	}
-
 	obsTicker := time.NewTicker(16 * time.Millisecond)
 	stateChanged := true
 
 	for {
 		select {
 		case data := <-dataChannel:
-			if data.StationID == currentFocusedStation {
-				if len(data.Message) >= 3 {
-					statusCode := data.Message[0:3]
+			state, exists := stationStates[data.StationID]
+			if !exists {
+				continue
+			}
 
-					if statusCode == "101" || statusCode == "200" {
-						name, attempt := parseSetupMessage(data.Message)
+			if len(data.Message) >= 3 {
+				statusCode := data.Message[0:3]
 
-						// Clear on new competitor or new attempt 1
-						if boardState.CompetitorName != name || attempt == 1 {
-							boardState.CompetitorName = name
-							boardState.Solves = [5]string{"-", "-", "-", "-", "-"}
-						}
+				if data.StationID == currentFocusedStation && statusCode != "102" {
+					fmt.Printf("[NETWORK] Received from %s: %s\n", data.StationID, data.Message)
+				}
 
-						// Reverse attempt back
-						for i := attempt - 1; i < 5; i++ {
-							boardState.Solves[i] = "-"
-						}
+				if statusCode == "101" || statusCode == "200" {
+					name, attempt := parseSetupMessage(data.Message)
 
-						boardState.CurrentAttempt = attempt
-						boardState.RunningTime = "0.00"
-						boardState.IsSolving = false
-						stateChanged = true
-					} else if statusCode == "102" {
-						boardState.RunningTime = extractValue(data.Message, "Time:")
-						boardState.IsSolving = true
-						stateChanged = true
-					} else if statusCode == "201" {
-						finalTimeStr := extractValue(data.Message, "Time:")
-						status := extractValue(data.Message, "Status:")
-
-						formattedTime := formatTime(finalTimeStr)
-
-						if status == "+2" {
-							formattedTime += "+"
-						}
-
-						boardState.RunningTime = formattedTime
-
-						if boardState.CurrentAttempt >= 1 && boardState.CurrentAttempt <= 5 {
-							boardState.Solves[boardState.CurrentAttempt-1] = formattedTime
-						}
-
-						boardState.IsSolving = false
-						stateChanged = true
+					// Clear on new competitor or new attempt 1
+					if state.CompetitorName != name || attempt == 1 {
+						state.CompetitorName = name
+						state.Solves = [5]string{"-", "-", "-", "-", "-"}
 					}
+
+					// Reverse attempt back
+					for i := attempt - 1; i < 5; i++ {
+						state.Solves[i] = "-"
+					}
+
+					state.CurrentAttempt = attempt
+					state.RunningTime = "0.00"
+					state.IsSolving = false
+					stateChanged = true
+				} else if statusCode == "102" {
+					state.RunningTime = extractValue(data.Message, "Time:")
+					state.IsSolving = true
+					stateChanged = true
+				} else if statusCode == "201" {
+					finalTimeStr := extractValue(data.Message, "Time:")
+					status := extractValue(data.Message, "Status:")
+
+					formattedTime := formatTime(finalTimeStr)
+
+					if status == "+2" {
+						formattedTime += "+"
+					}
+
+					state.RunningTime = formattedTime
+
+					if state.CurrentAttempt >= 1 && state.CurrentAttempt <= 5 {
+						state.Solves[state.CurrentAttempt-1] = formattedTime
+					}
+
+					state.IsSolving = false
+					stateChanged = true
 				}
 			}
 
 		case <-obsTicker.C:
 			if stateChanged {
-				writeOverlayFile(boardState)
+				activeState := stationStates[currentFocusedStation]
+				writeOverlayFile(*activeState)
 				stateChanged = false
 			}
 
@@ -122,6 +132,7 @@ func main() {
 			if input >= "1" && input <= "9" {
 				currentFocusedStation = "Station " + input
 				fmt.Printf("\n>>> SWITCHED OBS FEED TO %s <<<\n\n", currentFocusedStation)
+				stateChanged = true
 			}
 		}
 	}
@@ -157,7 +168,6 @@ func writeOverlayFile(state OverlayState) {
 	}
 }
 
-// TODO: Test BPA WPA and Ao5
 func getBPAWPA(solves [5]string) string {
 	sum := 0.0
 	maxTime := math.Inf(-1)
